@@ -1,0 +1,157 @@
+name: "Stage: Deploy Python Service"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — called by any Python/Docker service workflow.
+#
+# Callers MUST set:  runner, dest_dir, environment, service_name
+# Callers CAN set:   compose_file, deploy_script, verify_script, upload_env_artifact
+#
+# Deploy behaviour (two modes):
+#
+#   MODE A — custom scripts (e.g. strategic_execution_system)
+#     Set deploy_script to a path relative to dest_dir.
+#     The stage runs:
+#       sudo COMPOSE_FILE=… bash ./<deploy_script>
+#       sudo COMPOSE_FILE=… bash ./<verify_script>   (if provided)
+#
+#   MODE B — standard docker compose (default, no deploy_script)
+#     The stage runs:
+#       docker compose -f <compose_file> build --no-cache
+#       docker compose -f <compose_file> up -d --force-recreate
+#
+# Required secrets: env_file, vm_password
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        required: true
+      dest_dir:
+        description: "Absolute path on the VM where the service lives, e.g. /var/www/my-service"
+        type: string
+        required: true
+      compose_file:
+        description: "Docker Compose file passed to docker compose / deploy_script"
+        type: string
+        default: "docker-compose.yml"
+      environment:
+        description: "Deployment environment label (dev | prod)"
+        type: string
+        required: true
+      service_name:
+        description: "Human-readable service name used in log messages"
+        type: string
+        required: true
+      deploy_script:
+        description: >
+          Path to a custom deploy shell script, relative to dest_dir.
+          When set, the stage runs this script instead of `docker compose build/up`.
+          COMPOSE_FILE is exported for the script to consume.
+          Example: "strategic_execution_system/scripts/deploy_docker_stack.sh"
+        type: string
+        default: ""
+      verify_script:
+        description: >
+          Path to a post-deploy verification script, relative to dest_dir.
+          Only used when deploy_script is also set.
+          Example: "strategic_execution_system/scripts/verify_celery_stack.sh"
+        type: string
+        default: ""
+      upload_env_artifact:
+        description: "Upload the .env file as a workflow artifact (recommended for prod)"
+        type: boolean
+        default: false
+
+    secrets:
+      env_file:
+        description: "Full contents of the .env file for this environment"
+        required: true
+      vm_password:
+        description: "sudo password for the self-hosted runner user"
+        required: true
+
+    outputs:
+      deploy_log:
+        description: "Last 3 500 characters of the deployment log"
+        value: ${{ jobs.deploy.outputs.deploy_log }}
+
+jobs:
+  deploy:
+    name: "Deploy (${{ inputs.environment }})"
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      deploy_log: ${{ steps.deploy_step.outputs.deploy_log }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create .env file from secret
+        shell: bash
+        env:
+          ENV_SECRET: ${{ secrets.env_file }}
+        run: |
+          echo -e "$ENV_SECRET" >> $GITHUB_WORKSPACE/env.tmp
+          awk '{for(i=1;i<=NF;i++) if($i~/=/) print $i;}' $GITHUB_WORKSPACE/env.tmp >> $GITHUB_WORKSPACE/.env
+          echo "=== .env created for [${{ inputs.environment }}] ${{ inputs.service_name }} ==="
+
+      - name: Upload .env artifact
+        if: ${{ inputs.upload_env_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-file-${{ inputs.environment }}
+          path: ${{ github.workspace }}/env.tmp
+          retention-days: 1
+
+      - name: Deploy and validate
+        id: deploy_step
+        env:
+          VM_PASSWORD: ${{ secrets.vm_password }}
+          COMPOSE_FILE: ${{ inputs.compose_file }}
+          DEST_DIR: ${{ inputs.dest_dir }}
+          DEPLOY_SCRIPT: ${{ inputs.deploy_script }}
+          VERIFY_SCRIPT: ${{ inputs.verify_script }}
+        run: |
+          set -eo pipefail
+          LOG_FILE=$(mktemp)
+          save_log() {
+            TRUNCATED_LOG=$(tail -c 3500 "$LOG_FILE" 2>/dev/null || true)
+            printf 'deploy_log<<EOF\n%s\nEOF\n' "$TRUNCATED_LOG" >> "$GITHUB_OUTPUT"
+            rm -f "$LOG_FILE"
+          }
+          trap save_log EXIT
+
+          echo ">>> [${{ inputs.environment }}] Deploying ${{ inputs.service_name }} → $DEST_DIR" | tee -a "$LOG_FILE"
+
+          # ── Copy workspace to destination ─────────────────────────────────
+          echo "$VM_PASSWORD" | sudo -S mkdir -p "$DEST_DIR" 2>&1 | tee -a "$LOG_FILE"
+          echo "$VM_PASSWORD" | sudo -S cp -R . "$DEST_DIR" 2>&1 | tee -a "$LOG_FILE"
+          echo "$VM_PASSWORD" | sudo -S cp -R .env "$DEST_DIR/.env" 2>&1 | tee -a "$LOG_FILE"
+          cd "$DEST_DIR"
+
+          # ── Mode A: custom deploy script ──────────────────────────────────
+          if [ -n "$DEPLOY_SCRIPT" ]; then
+            echo ">>> Running deploy script: $DEPLOY_SCRIPT" | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S COMPOSE_FILE="$COMPOSE_FILE" bash "./$DEPLOY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+
+            if [ -n "$VERIFY_SCRIPT" ]; then
+              echo ">>> Running verify script: $VERIFY_SCRIPT" | tee -a "$LOG_FILE"
+              echo "$VM_PASSWORD" | sudo -S COMPOSE_FILE="$COMPOSE_FILE" bash "./$VERIFY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+            fi
+
+          # ── Mode B: standard docker compose ──────────────────────────────
+          else
+            echo ">>> Running: docker compose -f $COMPOSE_FILE build + up" | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S docker compose -f "$COMPOSE_FILE" build --no-cache 2>&1 | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S docker compose -f "$COMPOSE_FILE" up -d --force-recreate 2>&1 | tee -a "$LOG_FILE"
+            sleep 20
+          fi
+
+          # ── Cleanup old images ────────────────────────────────────────────
+          echo "$VM_PASSWORD" | sudo -S docker image prune -af --filter "until=24h" 2>&1 | tee -a "$LOG_FILE"
+          echo ">>> Deployment complete." | tee -a "$LOG_FILE"

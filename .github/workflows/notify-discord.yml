@@ -1,0 +1,124 @@
+name: "Stage: Discord Notification"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — sends a rich Discord embed after any deployment.
+# Callers pass the resolved result + log from their deploy jobs.
+# github.* context (repo, sha, actor, etc.) is inherited automatically.
+#
+# Required secret: discord_webhook
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","momah-vm"]'
+        type: string
+        default: '["self-hosted", "momah-vm"]'
+      deploy_result:
+        description: "Final deployment result: success | failure | cancelled"
+        type: string
+        required: true
+      environment:
+        description: "Human-readable environment name sent in the embed (development | production)"
+        type: string
+        required: true
+      deploy_log:
+        description: "Raw deploy log output; included in a second embed on failure"
+        type: string
+        default: ""
+
+    secrets:
+      discord_webhook:
+        description: "Discord channel webhook URL"
+        required: true
+
+jobs:
+  notify:
+    name: Discord Notification
+    runs-on: ${{ fromJSON(inputs.runner) }}
+
+    steps:
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.discord_webhook }}
+          DEPLOY_RESULT: ${{ inputs.deploy_result }}
+          ENV_TITLE: ${{ inputs.environment }}
+          DEPLOY_LOG: ${{ inputs.deploy_log }}
+          REPO: ${{ github.repository }}
+          REPO_URL: ${{ github.event.repository.html_url }}
+          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          AUTHOR: ${{ github.actor }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, urllib.request
+
+          webhook    = os.environ["DISCORD_WEBHOOK"]
+          result     = os.environ["DEPLOY_RESULT"]
+          repo       = os.environ["REPO"]
+          repo_url   = os.environ["REPO_URL"]
+          run_id     = os.environ["RUN_ID"]
+          branch     = os.environ["BRANCH"]
+          env_title  = os.environ["ENV_TITLE"]
+          author     = os.environ["AUTHOR"]
+          commit_sha = os.environ["COMMIT_SHA"][:7]
+          commit_msg = os.environ["COMMIT_MSG"]
+          run_url    = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+          is_success = result == "success"
+          color      = 2664261 if is_success else 14431557
+          icon       = "✅" if is_success else "❌"
+          desc       = (
+              f"Deployment ({env_title}) completed successfully."
+              if is_success else
+              f"Deployment ({env_title}) **FAILED**."
+          )
+
+          status_embed = {
+              "title": f"{icon} GitHub Action",
+              "description": desc,
+              "color": color,
+              "fields": [
+                  {"name": "📁 Project",    "value": f"[{repo}]({repo_url})",                                                   "inline": True},
+                  {"name": "🌍 Environment","value": env_title,                                                                  "inline": True},
+                  {"name": "📊 Status",     "value": result,                                                                     "inline": True},
+                  {"name": "👤 Author",     "value": author,                                                                     "inline": True},
+                  {"name": "🌿 Tag/Branch", "value": branch or "unknown",                                                        "inline": True},
+                  {"name": "🔗 Commit",     "value": f"[`{commit_sha}`]({repo_url}/commit/{os.environ['COMMIT_SHA']}) — {commit_msg}", "inline": False},
+                  {"name": "🚀 Run",        "value": f"[View run]({run_url})",                                                  "inline": False},
+              ],
+              "footer": {"text": "Deployment Service | Powered by GitHub"},
+          }
+
+          def post(payload):
+              data = json.dumps(payload).encode("utf-8")
+              req  = urllib.request.Request(
+                  webhook, data=data,
+                  headers={"Content-Type": "application/json", "User-Agent": "curl/8.5.0"},
+                  method="POST",
+              )
+              try:
+                  urllib.request.urlopen(req)
+              except Exception as e:
+                  print(f"Discord error: {e}")
+
+          post({"embeds": [status_embed]})
+
+          if not is_success:
+              log         = os.environ.get("DEPLOY_LOG", "").strip()
+              error_lines = [l.strip() for l in log.splitlines()
+                             if any(kw in l.lower() for kw in ["error", "failed", "exit code", "health check"])]
+              summary     = "\n".join(error_lines[-15:]) if error_lines else log[-800:]
+              log_embed   = {
+                  "title": "📋 Failure Logs",
+                  "color": 14431557,
+                  "fields": [
+                      {"name": "🌿 Target",        "value": branch or "unknown",              "inline": True},
+                      {"name": "📄 Error Summary", "value": f"```\n{summary[:980]}\n```", "inline": False},
+                  ],
+              }
+              post({"embeds": [log_embed]})
+          PYEOF

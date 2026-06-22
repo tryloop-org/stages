@@ -1,0 +1,57 @@
+name: "Stage: Build & Test (Python)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — called by any Python/FastAPI service workflow.
+# Callers can override: python_version, runner, test_directory, run_lint.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      python_version:
+        description: "Python version to use (must be installed on the runner)"
+        type: string
+        default: "3.11"
+      working_directory:
+        description: "Subdirectory containing the Python project (relative to repo root)"
+        type: string
+        default: "."
+      test_directory:
+        description: "Directory containing tests, relative to working_directory"
+        type: string
+        default: "tests"
+      run_lint:
+        description: "Run black / isort / flake8 checks after tests"
+        type: boolean
+        default: false
+
+jobs:
+  build_and_test:
+    name: Build & Test
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest ${{ inputs.test_directory }} -v
+
+      - name: Lint (black / isort / flake8)
+        if: ${{ inputs.run_lint }}
+        run: |
+          python -m black --check .
+          python -m isort --check-only .
+          python -m flake8 .
