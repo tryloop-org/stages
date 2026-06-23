@@ -5,8 +5,9 @@
 # gh auth login
 # Usage:
 #export DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
-export VM_PASSWORD="*****"
+#export VM_PASSWORD="your-dev-vm-sudo-password"
 #export VM_PROD_PASSWORD="your-prod-vm-sudo-password"
+export SECURITY_TOOLS_PAT="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"
 #bash create_secret_github.sh
 #
 # Requirements: gh CLI installed and authenticated (gh auth login)
@@ -20,7 +21,7 @@ ORG="tryloop-org"
 # Add or remove entries as needed.
 # Format: "SECRET_NAME=value"
 declare -a SECRETS=(
-  "VM_PASSWORD=${VM_PASSWORD:-}"
+  "SECURITY_TOOLS_PAT=${SECURITY_TOOLS_PAT:-}"
 )
 
 # ── Validate all secrets are provided ────────────────────────────────────────
