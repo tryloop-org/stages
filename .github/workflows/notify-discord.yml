@@ -26,8 +26,8 @@ on:
 
     secrets:
       discord_webhook:
-        description: "Discord channel webhook URL"
-        required: true
+        description: "Discord channel webhook URL (optional — skipped if not set)"
+        required: false
 
 jobs:
   notify:
@@ -52,7 +52,11 @@ jobs:
           python3 - <<'PYEOF'
           import json, os, urllib.request
 
-          webhook    = os.environ["DISCORD_WEBHOOK"]
+          webhook = os.environ.get("DISCORD_WEBHOOK", "").strip()
+          if not webhook:
+              print("DISCORD_WEBHOOK secret is not set — skipping notification")
+              raise SystemExit(0)
+
           result     = os.environ["DEPLOY_RESULT"]
           repo       = os.environ["REPO"]
           repo_url   = os.environ["REPO_URL"]
