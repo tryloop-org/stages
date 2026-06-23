@@ -1,0 +1,64 @@
+name: "Stage: Build & Test (Frontend)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage for React / Vite / Node.js services.
+# Used by: kind-helper-mate, minister-mind-fe, uep-system-admin-ui
+#
+# What it does:
+#   1. npm install        — install all dependencies
+#   2. npm run lint       — ESLint check (fails pipeline if lint errors)
+#   3. npm run build      — production build (fails if TypeScript / build errors)
+#   4. npm run test       — unit tests (optional, only if run_tests: true)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      node_version:
+        description: "Node.js version to use (must be installed on the runner)"
+        type: string
+        default: "20"
+      working_directory:
+        description: "Subdirectory containing the frontend project (relative to repo root)"
+        type: string
+        default: "."
+      run_lint:
+        description: "Run ESLint check"
+        type: boolean
+        default: true
+      run_tests:
+        description: "Run npm run test (skip if no test script defined)"
+        type: boolean
+        default: false
+
+jobs:
+  build_and_test:
+    name: Build & Test (Frontend)
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint
+        if: ${{ inputs.run_lint }}
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        if: ${{ inputs.run_tests }}
+        run: npm run test

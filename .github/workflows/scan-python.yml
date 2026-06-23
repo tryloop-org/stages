@@ -1,0 +1,78 @@
+name: "Stage: Code Scan (Python)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage for Python / FastAPI services.
+#
+# What it does:
+#   1. flake8  — syntax errors, undefined variables, bad imports
+#   2. bandit  — security vulnerabilities (hardcoded secrets, SQL injection,
+#                unsafe functions, weak crypto, shell injection, etc.)
+#
+# Both tools install in seconds — no need to install the full app.
+# docker compose build already handles dependency validation on the VM.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      working_directory:
+        description: "Directory containing the Python project"
+        type: string
+        default: "."
+      scan_directory:
+        description: "Directory to scan (usually app/ or src/)"
+        type: string
+        default: "app"
+      bandit_severity:
+        description: "Minimum severity to report: LOW | MEDIUM | HIGH"
+        type: string
+        default: "MEDIUM"
+      run_flake8:
+        description: "Run flake8 syntax and undefined-variable check"
+        type: boolean
+        default: true
+      run_bandit:
+        description: "Run bandit security scan"
+        type: boolean
+        default: true
+
+jobs:
+  scan:
+    name: Code Scan (Python)
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install scan tools
+        run: pip install flake8 bandit
+
+      - name: flake8 — syntax & undefined variables
+        if: ${{ inputs.run_flake8 }}
+        run: |
+          flake8 ${{ inputs.scan_directory }} \
+            --select=E9,F8,F63,F7 \
+            --show-source \
+            --statistics
+        # E9   = syntax errors (SyntaxError, IndentationError)
+        # F8xx = undefined names, unused imports
+        # F63x = invalid syntax in assert / print statements
+        # F7xx = statement errors
+
+      - name: bandit — security vulnerabilities
+        if: ${{ inputs.run_bandit }}
+        run: |
+          bandit -r ${{ inputs.scan_directory }} \
+            -l \
+            --severity-level ${{ inputs.bandit_severity }} \
+            -f txt

@@ -1,8 +1,15 @@
 name: "Stage: Build & Test (Python)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Reusable stage — called by any Python/FastAPI service workflow.
-# Callers can override: python_version, runner, test_directory, run_lint.
+# Reusable stage for Python / FastAPI services.
+# Used by: MOMAH-Token-Master, aoun-system, strategic_execution_system,
+#          audit-logs-service, MOMAH-Notifications, MOMAH-Business-Cards-API,
+#          MOMAH-DMS-Integration-, text-contradiction-detector, etc.
+#
+# What it does:
+#   1. pip install -r requirements.txt  — install dependencies
+#   2. pytest <test_directory> -v       — run all tests (fails pipeline if any fail)
+#   3. black / isort / flake8           — lint checks (optional, run_lint: true)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:

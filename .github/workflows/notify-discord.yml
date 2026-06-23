@@ -11,10 +11,6 @@ name: "Stage: Discord Notification"
 on:
   workflow_call:
     inputs:
-      runner:
-        description: 'Runner labels as a JSON array, e.g. ["self-hosted","momah-vm"]'
-        type: string
-        default: '["self-hosted", "momah-vm"]'
       deploy_result:
         description: "Final deployment result: success | failure | cancelled"
         type: string
@@ -36,7 +32,7 @@ on:
 jobs:
   notify:
     name: Discord Notification
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ubuntu-latest   # GitHub-hosted — always available even if your VM is down
 
     steps:
       - name: Send Discord notification
@@ -68,10 +64,14 @@ jobs:
           commit_msg = os.environ["COMMIT_MSG"]
           run_url    = f"https://github.com/{repo}/actions/runs/{run_id}"
 
+          # cancelled means an earlier stage (malware scan / code scan) failed
+          # and blocked the deploy — treat it the same as failure
           is_success = result == "success"
-          color      = 2664261 if is_success else 14431557
-          icon       = "✅" if is_success else "❌"
-          desc       = (
+          display_result = result if result != "cancelled" else "failure"
+
+          color = 2664261 if is_success else 14431557
+          icon  = "✅" if is_success else "❌"
+          desc  = (
               f"Deployment ({env_title}) completed successfully."
               if is_success else
               f"Deployment ({env_title}) **FAILED**."
@@ -82,13 +82,13 @@ jobs:
               "description": desc,
               "color": color,
               "fields": [
-                  {"name": "📁 Project",    "value": f"[{repo}]({repo_url})",                                                   "inline": True},
-                  {"name": "🌍 Environment","value": env_title,                                                                  "inline": True},
-                  {"name": "📊 Status",     "value": result,                                                                     "inline": True},
-                  {"name": "👤 Author",     "value": author,                                                                     "inline": True},
-                  {"name": "🌿 Tag/Branch", "value": branch or "unknown",                                                        "inline": True},
+                  {"name": "📁 Project",    "value": f"[{repo}]({repo_url})",                                                        "inline": True},
+                  {"name": "🌍 Environment","value": env_title,                                                                       "inline": True},
+                  {"name": "📊 Status",     "value": display_result,                                                                  "inline": True},
+                  {"name": "👤 Author",     "value": author,                                                                          "inline": True},
+                  {"name": "🌿 Tag/Branch", "value": branch or "unknown",                                                             "inline": True},
                   {"name": "🔗 Commit",     "value": f"[`{commit_sha}`]({repo_url}/commit/{os.environ['COMMIT_SHA']}) — {commit_msg}", "inline": False},
-                  {"name": "🚀 Run",        "value": f"[View run]({run_url})",                                                  "inline": False},
+                  {"name": "🚀 Run",        "value": f"[View run]({run_url})",                                                        "inline": False},
               ],
               "footer": {"text": "Deployment Service | Powered by GitHub"},
           }
@@ -116,7 +116,7 @@ jobs:
                   "title": "📋 Failure Logs",
                   "color": 14431557,
                   "fields": [
-                      {"name": "🌿 Target",        "value": branch or "unknown",              "inline": True},
+                      {"name": "🌿 Target",        "value": branch or "unknown",          "inline": True},
                       {"name": "📄 Error Summary", "value": f"```\n{summary[:980]}\n```", "inline": False},
                   ],
               }

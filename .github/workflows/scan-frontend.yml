@@ -1,0 +1,60 @@
+name: "Stage: Code Scan (Frontend)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage for React / Vite / Node.js services.
+#
+# What it does:
+#   1. npm install         — install dependencies
+#   2. npm run lint        — ESLint: catches bugs, bad patterns, unused vars
+#   3. npm run build       — Vite build: catches TypeScript type errors,
+#                            missing imports, broken components
+#
+# npm run build is the most valuable step here — it compiles the whole app
+# and will fail on any TypeScript error or broken import before it reaches
+# the VM. docker compose build would catch this too but much later.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      working_directory:
+        description: "Directory containing the frontend project"
+        type: string
+        default: "."
+      run_lint:
+        description: "Run ESLint check"
+        type: boolean
+        default: true
+      run_build:
+        description: "Run production build (catches TypeScript errors)"
+        type: boolean
+        default: true
+
+jobs:
+  scan:
+    name: Code Scan (Frontend)
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: ESLint — bugs and bad patterns
+        if: ${{ inputs.run_lint }}
+        run: npm run lint
+
+      - name: Build — TypeScript and import errors
+        if: ${{ inputs.run_build }}
+        run: npm run build
