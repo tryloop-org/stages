@@ -89,6 +89,7 @@ jobs:
         run: |
           set -eo pipefail
           LOG_FILE=$(mktemp)
+          ENV_BACKUP="/tmp/.env_backup_$(basename $DEST_DIR)"
           save_log() {
             TRUNCATED_LOG=$(tail -c 3500 "$LOG_FILE" 2>/dev/null || true)
             printf 'deploy_log<<EOF\n%s\nEOF\n' "$TRUNCATED_LOG" >> "$GITHUB_OUTPUT"
@@ -106,9 +107,22 @@ jobs:
               "$DEST_DIR" 2>&1 | tee -a "$LOG_FILE"
           fi
 
+          # ── Backup .env before checkout to prevent overwrite ──────────────
+          if echo "$VM_PASSWORD" | sudo -S test -f "$DEST_DIR/.env"; then
+            echo ">>> Backing up .env..." | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S cp "$DEST_DIR/.env" "$ENV_BACKUP"
+          fi
+
           echo ">>> Fetching tags and checking out $DEPLOY_TAG..." | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags 2>&1 | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout "$DEPLOY_TAG" 2>&1 | tee -a "$LOG_FILE"
+
+          # ── Restore .env after checkout ───────────────────────────────────
+          if [ -f "$ENV_BACKUP" ]; then
+            echo ">>> Restoring .env..." | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S cp "$ENV_BACKUP" "$DEST_DIR/.env"
+            rm -f "$ENV_BACKUP"
+          fi
 
           cd "$DEST_DIR"
 
