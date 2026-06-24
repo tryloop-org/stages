@@ -121,7 +121,7 @@ jobs:
           if [ -f "$ENV_BACKUP" ]; then
             echo ">>> Restoring .env..." | tee -a "$LOG_FILE"
             echo "$VM_PASSWORD" | sudo -S cp "$ENV_BACKUP" "$DEST_DIR/.env"
-            rm -f "$ENV_BACKUP"
+            echo "$VM_PASSWORD" | sudo -S rm -f "$ENV_BACKUP"
           fi
 
           cd "$DEST_DIR"
