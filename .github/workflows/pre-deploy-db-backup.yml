@@ -1,0 +1,95 @@
+name: "Stage: Pre-Deploy DB Backup (Supabase)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — run this BEFORE any prod deployment to back up the Supabase
+# PostgreSQL database.  Blocks the deploy pipeline if the backup fails.
+#
+# Callers MUST set:  runner
+# Callers CAN set:   db_name, namespace, backup_dir, keep
+#
+# The self-hosted runner must have:
+#   - kubectl in PATH
+#   - ~/.kube/configsupabase pointing at the Supabase cluster
+#   - gzip in PATH
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        required: true
+      db_name:
+        description: "PostgreSQL database name to back up"
+        type: string
+        default: "postgres"
+      namespace:
+        description: "Kubernetes namespace where the Supabase DB pod runs"
+        type: string
+        default: "supabase"
+      backup_dir:
+        description: "Absolute path on the runner where backups are stored"
+        type: string
+        default: "/var/backups/momah-supabase"
+      keep:
+        description: "Number of recent backups to keep on disk"
+        type: string
+        default: "10"
+
+    outputs:
+      backup_file:
+        description: "Absolute path of the backup file that was created"
+        value: ${{ jobs.backup.outputs.backup_file }}
+
+jobs:
+  backup:
+    name: "DB Backup (Supabase / ${{ inputs.db_name }})"
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      backup_file: ${{ steps.run_backup.outputs.backup_file }}
+
+    steps:
+      - name: Checkout shared scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            k8s/shared/pre-deploy-backup.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Make backup script executable
+        run: chmod +x k8s/shared/pre-deploy-backup.sh
+
+      - name: Run pre-deployment backup
+        id: run_backup
+        env:
+          KUBECONFIG: "${{ runner.temp }}/../../../.kube/configsupabase"
+        run: |
+          set -euo pipefail
+
+          # Resolve kubeconfig relative to runner home if not an absolute path
+          if [[ ! -f "$KUBECONFIG" ]]; then
+            KUBECONFIG="$HOME/.kube/configsupabase"
+          fi
+          export KUBECONFIG
+
+          mkdir -p "${{ inputs.backup_dir }}"
+
+          OUTPUT=$(bash k8s/shared/pre-deploy-backup.sh \
+            --db  "${{ inputs.db_name }}" \
+            --ns  "${{ inputs.namespace }}" \
+            --out "${{ inputs.backup_dir }}" \
+            --keep "${{ inputs.keep }}" \
+            2>&1 | tee /dev/stderr)
+
+          # Extract the backup file path from script output
+          BACKUP_FILE=$(echo "$OUTPUT" | grep '^BACKUP_FILE=' | cut -d= -f2-)
+          echo "backup_file=$BACKUP_FILE" >> "$GITHUB_OUTPUT"
+          echo "Backup written to: $BACKUP_FILE"
+
+      - name: Verify backup exists and is readable
+        run: |
+          BACKUP_FILE="${{ steps.run_backup.outputs.backup_file }}"
+          [[ -f "$BACKUP_FILE" ]] || { echo "[ERROR] Backup file not found: $BACKUP_FILE"; exit 1; }
+          echo "[OK] Backup verified: $(du -sh "$BACKUP_FILE" | cut -f1)"
