@@ -14,9 +14,11 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        description: >
+          Runner labels as a JSON array. If the caller sets this, that value is used;
+          if omitted, falls back to the in-cluster momah/ai-garden runner below.
         type: string
-        default: '["self-hosted", "azure-runner"]'
+        default: '["self-hosted", "linux", "x64", "momah", "ai-garden"]'
       image_name:
         description: >
           Image repo path, without registry, e.g. momah-service/strategic_execution_system.
@@ -66,6 +68,13 @@ jobs:
   build:
     name: Build & Push
     runs-on: ${{ fromJSON(inputs.runner) }}
+    # Runs the whole job inside this image instead of directly on the runner —
+    # gives us `docker` even on runners that don't have it installed (e.g. the
+    # in-cluster momah/ai-garden runner pod). Requires the runner to support
+    # job containers (ARC container-mode hooks); on a plain VM runner that
+    # already has Docker this is a no-op either way.
+    container:
+      image: docker:24-dind
     outputs:
       image_ref: ${{ steps.build_step.outputs.image_ref }}
 
