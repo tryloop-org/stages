@@ -1,0 +1,121 @@
+name: "Stage: Build & Push Image (ACR)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — builds a Docker image and pushes it to Azure Container
+# Registry. This is the GitHub Actions / ACR equivalent of the GitLab
+# stage/gitlab/docker/build.yaml and stage/gitlab/kaniko/build.yaml jobs:
+# same tagging convention (branch build -> <sha> + <ref>, tag build ->
+# <sha> + <ref> + latest), reimplemented with `docker build` + `az acr login`.
+#
+# Required secrets: acr_login_server, acr_username, acr_password
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      image_name:
+        description: "Image name, without registry, e.g. strategic-execution-system"
+        type: string
+        required: true
+      context:
+        description: "Docker build context, relative to repo root"
+        type: string
+        default: "."
+      dockerfile:
+        description: "Path to the Dockerfile, relative to repo root"
+        type: string
+        default: "Dockerfile"
+      build_args:
+        description: "Extra --build-arg entries, one per line (KEY=VALUE)"
+        type: string
+        default: ""
+
+    secrets:
+      acr_login_server:
+        description: "e.g. youracr.azurecr.io"
+        required: true
+      acr_username:
+        required: true
+      acr_password:
+        required: true
+
+    outputs:
+      image_ref:
+        description: "Full image ref pushed for this build (registry/name:sha)"
+        value: ${{ jobs.build.outputs.image_ref }}
+
+jobs:
+  build:
+    name: Build & Push
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      image_ref: ${{ steps.build_step.outputs.image_ref }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and push
+        id: build_step
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.acr_login_server }}
+          ACR_USERNAME: ${{ secrets.acr_username }}
+          ACR_PASSWORD: ${{ secrets.acr_password }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_ARGS: ${{ inputs.build_args }}
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ github.ref_type == 'tag' }}
+        run: |
+          set -euo pipefail
+
+          echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
+            --username "$ACR_USERNAME" --password-stdin
+
+          # Same sanitization as GitLab's CI_COMMIT_REF_SHORT_NAME:
+          # strip feature//training//release/ prefixes so branch names stay
+          # a valid docker tag.
+          REF_SHORT_NAME="${REF_NAME/feature\//}"
+          REF_SHORT_NAME="${REF_SHORT_NAME/training\//}"
+          REF_SHORT_NAME="${REF_SHORT_NAME/release\//}"
+
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
+
+          # Turn the newline-separated BUILD_ARGS input into repeated
+          # --build-arg flags, same pattern as the GitLab jobs' fixed list of
+          # --build-arg entries but caller-configurable per service.
+          BUILD_ARG_FLAGS=()
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            BUILD_ARG_FLAGS+=(--build-arg "$line")
+          done <<< "$BUILD_ARGS"
+
+          TAGS=(-t "${IMAGE}:${SHORT_SHA}" -t "${IMAGE}:${REF_SHORT_NAME}")
+          if [ "$IS_TAG" = "true" ]; then
+            TAGS+=(-t "${IMAGE}:latest")
+          fi
+
+          echo ">>> Building ${IMAGE} (${REF_SHORT_NAME}, ${SHORT_SHA})"
+          docker build \
+            --build-arg "VCS_REF=${SHORT_SHA}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            --build-arg "VERSION=${REF_SHORT_NAME}" \
+            "${BUILD_ARG_FLAGS[@]}" \
+            -f "${DOCKERFILE}" \
+            "${TAGS[@]}" \
+            "${CONTEXT}"
+
+          echo ">>> Pushing all tags"
+          docker push --all-tags "${IMAGE}"
+
+          echo "image_ref=${IMAGE}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          docker logout "$ACR_LOGIN_SERVER"

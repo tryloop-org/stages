@@ -1,0 +1,82 @@
+name: "Stage: Package & Push Helm Chart (ACR)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — packages a Helm chart and pushes it to Azure Container
+# Registry as an OCI artifact. Equivalent of the GitLab footer.yaml
+# `helm_push` function, targeting `oci://<acr>/helm` instead of a Harbor
+# chartrepo URL.
+#
+# Used to publish the one shared `momah-service` chart
+# (k8s/charts/momah-service) so every service's deploy stage can pull it by
+# version instead of each service vendoring its own copy of the templates.
+#
+# Required secrets: acr_login_server, acr_username, acr_password
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        default: '["self-hosted", "azure-runner"]'
+      chart_path:
+        description: "Path to the chart directory, relative to repo root, e.g. k8s/charts/momah-service"
+        type: string
+        required: true
+      chart_repo_path:
+        description: "OCI repo path under the registry to push to"
+        type: string
+        default: "helm"
+
+    secrets:
+      acr_login_server:
+        required: true
+      acr_username:
+        required: true
+      acr_password:
+        required: true
+
+    outputs:
+      chart_version:
+        description: "Chart version read from Chart.yaml and pushed"
+        value: ${{ jobs.package.outputs.chart_version }}
+
+jobs:
+  package:
+    name: Package & Push Chart
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      chart_version: ${{ steps.push_step.outputs.chart_version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout stages scripts
+        uses: actions/checkout@v4
+        with:
+          repository: tryloop-org/stages
+          ref: main
+          path: _stages
+
+      - name: Package and push chart
+        id: push_step
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.acr_login_server }}
+          ACR_USERNAME: ${{ secrets.acr_username }}
+          ACR_PASSWORD: ${{ secrets.acr_password }}
+          CHART_PATH: ${{ inputs.chart_path }}
+          CHART_REPO_PATH: ${{ inputs.chart_repo_path }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/_stages/scripts/functions.sh"
+
+          helm lint "$CHART_PATH"
+
+          acr_login "$ACR_LOGIN_SERVER" "$ACR_USERNAME" "$ACR_PASSWORD"
+
+          version=$(helm_push_chart "$CHART_PATH" "$ACR_LOGIN_SERVER" "$CHART_REPO_PATH")
+          echo "chart_version=${version}" >> "$GITHUB_OUTPUT"
+
+          helm registry logout "$ACR_LOGIN_SERVER"

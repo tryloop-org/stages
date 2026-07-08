@@ -1,0 +1,164 @@
+name: "Stage: Deploy to Kubernetes (Helm/ACR)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable stage — deploys a service to Kubernetes using the shared
+# `momah-service` Helm chart pulled from ACR (OCI). Companion to
+# deploy-python.yml (the existing VM/docker-compose stage) — this one targets
+# the k8s cluster instead and does not touch the VM deploy path at all.
+#
+# Deploy flow:
+#   1. helm registry login to ACR
+#   2. write kubeconfig, ensure the target namespace exists (ensure_namespace,
+#      ported from GitLab footer.yaml)
+#   3. resolve the service's values file (values-<environment>.yaml, falling
+#      back to values.yaml)
+#   4. helm upgrade --install <service> oci://<acr>/<chart_repo_path>/<chart_name>
+#      --version <chart_version> -f <values file> --set image.tag=<tag>
+#      --wait (blocks until every Deployment in the release is ready —
+#      replaces the manual rollout-status polling in GitLab's wait_deploy2)
+#   5. optional verify_script for deeper functional checks (e.g. Celery ping)
+#
+# Required secrets: acr_login_server, acr_username, acr_password, kubeconfig
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner labels as a JSON array, e.g. ["self-hosted","azure-runner"]'
+        type: string
+        required: true
+      environment:
+        description: "Deployment environment label (dev | prod)"
+        type: string
+        required: true
+      service_name:
+        description: "Helm release name, e.g. strategic-execution-system"
+        type: string
+        required: true
+      namespace:
+        description: "Target namespace, e.g. momah-dev"
+        type: string
+        required: true
+      values_dir:
+        description: "Directory (relative to repo root) containing values.yaml / values-<env>.yaml"
+        type: string
+        required: true
+      chart_name:
+        description: "Chart name as pushed to ACR"
+        type: string
+        default: "momah-service"
+      chart_repo_path:
+        description: "OCI repo path under the registry the chart was pushed to"
+        type: string
+        default: "helm"
+      chart_version:
+        description: "Chart version to deploy"
+        type: string
+        required: true
+      image_tag:
+        description: "Image tag to deploy (--set image.tag=...)"
+        type: string
+        required: true
+      verify_script:
+        description: >
+          Optional post-deploy verify script path relative to repo root.
+          Run with KUBECONFIG and NAMESPACE exported. Example:
+          "scripts/verify_celery_stack_k8s.sh"
+        type: string
+        default: ""
+
+    secrets:
+      acr_login_server:
+        required: true
+      acr_username:
+        required: true
+      acr_password:
+        required: true
+      kubeconfig:
+        description: "Base64-encoded kubeconfig for the target cluster"
+        required: true
+
+    outputs:
+      deploy_log:
+        description: "Last 3 500 characters of the deployment log"
+        value: ${{ jobs.deploy.outputs.deploy_log }}
+
+jobs:
+  deploy:
+    name: "Deploy (${{ inputs.environment }})"
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    outputs:
+      deploy_log: ${{ steps.deploy_step.outputs.deploy_log }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout stages scripts
+        uses: actions/checkout@v4
+        with:
+          repository: tryloop-org/stages
+          ref: main
+          path: _stages
+
+      - name: Deploy
+        id: deploy_step
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.acr_login_server }}
+          ACR_USERNAME: ${{ secrets.acr_username }}
+          ACR_PASSWORD: ${{ secrets.acr_password }}
+          KUBECONFIG_B64: ${{ secrets.kubeconfig }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          NAMESPACE: ${{ inputs.namespace }}
+          VALUES_DIR: ${{ inputs.values_dir }}
+          CHART_NAME: ${{ inputs.chart_name }}
+          CHART_REPO_PATH: ${{ inputs.chart_repo_path }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          VERIFY_SCRIPT: ${{ inputs.verify_script }}
+        run: |
+          set -eo pipefail
+          LOG_FILE=$(mktemp)
+          save_log() {
+            TRUNCATED_LOG=$(tail -c 3500 "$LOG_FILE" 2>/dev/null || true)
+            printf 'deploy_log<<EOF\n%s\nEOF\n' "$TRUNCATED_LOG" >> "$GITHUB_OUTPUT"
+            rm -f "$LOG_FILE"
+          }
+          trap save_log EXIT
+
+          source "$GITHUB_WORKSPACE/_stages/scripts/functions.sh" 2>&1 | tee -a "$LOG_FILE"
+
+          echo ">>> [$ENVIRONMENT] Deploying $SERVICE_NAME tag=$IMAGE_TAG -> namespace $NAMESPACE" | tee -a "$LOG_FILE"
+
+          echo ">>> Logging into ACR..." | tee -a "$LOG_FILE"
+          acr_login "$ACR_LOGIN_SERVER" "$ACR_USERNAME" "$ACR_PASSWORD" 2>&1 | tee -a "$LOG_FILE"
+
+          echo ">>> Writing kubeconfig..." | tee -a "$LOG_FILE"
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          echo "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
+
+          echo ">>> Ensuring namespace exists..." | tee -a "$LOG_FILE"
+          ensure_namespace "$NAMESPACE" 2>&1 | tee -a "$LOG_FILE"
+
+          echo ">>> Resolving values file..." | tee -a "$LOG_FILE"
+          VALUES_FILE=$(resolve_values_file "$VALUES_DIR" "$ENVIRONMENT")
+          echo "Using values file: $VALUES_FILE" | tee -a "$LOG_FILE"
+
+          echo ">>> Helm upgrade --install..." | tee -a "$LOG_FILE"
+          helm upgrade --install "$SERVICE_NAME" \
+            "oci://${ACR_LOGIN_SERVER}/${CHART_REPO_PATH}/${CHART_NAME}" \
+            --version "$CHART_VERSION" \
+            -f "$VALUES_FILE" \
+            --set "image.tag=${IMAGE_TAG}" \
+            --namespace "$NAMESPACE" \
+            --wait --timeout 5m 2>&1 | tee -a "$LOG_FILE"
+
+          if [ -n "$VERIFY_SCRIPT" ]; then
+            echo ">>> Running verify script: $VERIFY_SCRIPT" | tee -a "$LOG_FILE"
+            bash "$VERIFY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+          fi
+
+          helm registry logout "$ACR_LOGIN_SERVER" 2>&1 | tee -a "$LOG_FILE" || true
+          echo ">>> Deployment complete — release: $SERVICE_NAME, tag: $IMAGE_TAG" | tee -a "$LOG_FILE"
