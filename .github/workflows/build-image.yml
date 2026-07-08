@@ -18,7 +18,11 @@ on:
         type: string
         default: '["self-hosted", "azure-runner"]'
       image_name:
-        description: "Image name, without registry, e.g. strategic-execution-system"
+        description: >
+          Image repo path, without registry, e.g. momah-service/strategic_execution_system.
+          Convention: every service's image lives under the `momah-service/` prefix in ACR
+          (ministermindacr.azurecr.io/momah-service/<service>), keeping images distinct
+          from the `helm/momah-service` chart repo path.
         type: string
         required: true
       context:
