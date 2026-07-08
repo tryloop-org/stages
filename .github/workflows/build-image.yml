@@ -46,6 +46,16 @@ on:
         required: true
       acr_password:
         required: true
+      extra_build_arg_secrets:
+        description: >
+          Extra --build-arg entries sourced from secrets, one per line (KEY=VALUE).
+          Use this instead of `build_args` whenever a value comes from `secrets.*` —
+          the `secrets` context is not available inside a caller's `with:` block, only
+          inside `secrets:`, so values that must be interpolated from a GitHub secret
+          have to be passed here. Note these are NOT masked in the image layers
+          (`docker history` reveals them) — only pass values that are already safe to
+          embed client-side, e.g. a Vite/public key, never a real backend credential.
+        required: false
 
     outputs:
       image_ref:
@@ -75,6 +85,7 @@ jobs:
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           BUILD_ARGS: ${{ inputs.build_args }}
+          EXTRA_BUILD_ARG_SECRETS: ${{ secrets.extra_build_arg_secrets }}
           REF_NAME: ${{ github.ref_name }}
           IS_TAG: ${{ github.ref_type == 'tag' }}
         run: |
@@ -94,14 +105,15 @@ jobs:
           BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
 
-          # Turn the newline-separated BUILD_ARGS input into repeated
-          # --build-arg flags, same pattern as the GitLab jobs' fixed list of
-          # --build-arg entries but caller-configurable per service.
+          # Turn the newline-separated BUILD_ARGS (+ secret-sourced
+          # EXTRA_BUILD_ARG_SECRETS) input into repeated --build-arg flags,
+          # same pattern as the GitLab jobs' fixed list of --build-arg entries
+          # but caller-configurable per service.
           BUILD_ARG_FLAGS=()
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             BUILD_ARG_FLAGS+=(--build-arg "$line")
-          done <<< "$BUILD_ARGS"
+          done <<< "$BUILD_ARGS"$'\n'"$EXTRA_BUILD_ARG_SECRETS"
 
           TAGS=(-t "${IMAGE}:${SHORT_SHA}" -t "${IMAGE}:${REF_SHORT_NAME}")
           if [ "$IS_TAG" = "true" ]; then
