@@ -99,24 +99,27 @@ jobs:
           REF_NAME: ${{ github.ref_name }} #extract the tag 
           IS_TAG: ${{ github.ref_type == 'tag' }}
         run: |
-          set -euo pipefail
+          set -eu
 
           echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
             --username "$ACR_USERNAME" --password-stdin
 
-          
           TARGET_IMAGE_TAG="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${REF_NAME}"
 
-          # Turn the newline-separated BUILD_ARGS input into repeated --build-arg flags
-          BUILD_ARG_FLAGS=()
-          while IFS= read -r line; do
+          # En sh, on construit une chaîne de caractères au lieu d'un tableau
+          BUILD_ARG_FLAGS=""
+          
+          # On lit le flux ligne par ligne de manière compatible POSIX
+          echo "$BUILD_ARGS" | while IFS= read -r line; do
             [ -z "$line" ] && continue
-            BUILD_ARG_FLAGS+=(--build-arg "$line")
-          done <<< "$BUILD_ARGS"
+            BUILD_ARG_FLAGS="$BUILD_ARG_FLAGS --build-arg $line"
+          done
 
           echo ">>> Building ${TARGET_IMAGE_TAG}"
+          
+          # On passe la chaîne de caractères directement (sans guillemets autour de la variable pour que le shell sépare les arguments)
           docker build \
-            "${BUILD_ARG_FLAGS[@]}" \
+            $BUILD_ARG_FLAGS \
             -f "${DOCKERFILE}" \
             -t "${TARGET_IMAGE_TAG}" \
             "${CONTEXT}"
