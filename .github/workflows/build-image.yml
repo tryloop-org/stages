@@ -79,6 +79,14 @@ jobs:
       image_ref: ${{ steps.build_step.outputs.image_ref }}
 
     steps:
+      # docker:24-dind is Alpine-based — no bash, no git out of the box.
+      # actions/checkout needs git, and our build script below is bash (arrays,
+      # <<<, etc.), so both must be installed before anything else runs. This
+      # one step must use `shell: sh` explicitly since bash doesn't exist yet.
+      - name: Install bash + git (Alpine base image has neither)
+        shell: sh
+        run: apk add --no-cache bash git
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
