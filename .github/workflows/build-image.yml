@@ -114,14 +114,18 @@ jobs:
 
           TARGET_IMAGE_TAG="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${REF_NAME}"
 
-          # En sh, on construit une chaîne de caractères au lieu d'un tableau
+          # Heredoc, not `echo | while`: a pipe runs the loop in a subshell and
+          # every flag appended there is lost before docker build reads them.
+          # EXTRA_BUILD_ARG_SECRETS rides along here — same KEY=VALUE lines,
+          # just sourced from the caller's `secrets:` block.
           BUILD_ARG_FLAGS=""
-          
-          # On lit le flux ligne par ligne de manière compatible POSIX
-          echo "$BUILD_ARGS" | while IFS= read -r line; do
+          while IFS= read -r line; do
             [ -z "$line" ] && continue
             BUILD_ARG_FLAGS="$BUILD_ARG_FLAGS --build-arg $line"
-          done
+          done <<EOF
+          $BUILD_ARGS
+          $EXTRA_BUILD_ARG_SECRETS
+          EOF
 
           echo ">>> Building ${TARGET_IMAGE_TAG}"
           
