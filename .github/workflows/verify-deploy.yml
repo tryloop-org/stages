@@ -1,0 +1,91 @@
+name: "Stage: Verify AKS Deployment"
+
+# Reusable stage — waits until the cluster actually runs the image this
+# pipeline just pushed, and the rollout is healthy. Chain it after
+# build-image.yml so the workflow only goes green when the deploy landed:
+#
+#   tag push -> build & push to ACR -> ArgoCD Image Updater picks the tag
+#   (~10s poll) -> ArgoCD rolls the Deployment -> this job watches it.
+#
+# Runs on the self-hosted runner, which lives INSIDE the AKS cluster
+# (github-runners namespace), so it talks to the API server with the
+# runner ServiceAccount token — no kubeconfig secret needed. The token
+# only has read access (Role verify-deploy-read in the target namespace,
+# bound to github-runners/runner — see k8s/shared/runner-verify-rbac.yaml).
+
+on:
+  workflow_call:
+    inputs:
+      deployment:
+        description: "Deployment name to watch (e.g. momah-notifications)"
+        required: true
+        type: string
+      image_ref:
+        description: "Exact image the deployment must end up running, incl. tag (e.g. $ACR/momah-service/dev/foo:v1.2.3.dev)"
+        required: true
+        type: string
+      namespace:
+        description: "Kubernetes namespace of the deployment"
+        required: false
+        type: string
+        default: "unified-dev"
+      timeout_seconds:
+        description: "Max seconds to wait for image pickup + healthy rollout"
+        required: false
+        type: number
+        default: 900
+
+jobs:
+  verify:
+    name: Wait for healthy rollout
+    runs-on: [self-hosted, momah]
+    steps:
+      - name: Install kubectl
+        run: |
+          set -eu
+          command -v kubectl >/dev/null 2>&1 && { kubectl version --client=true; exit 0; }
+          VER="$(curl -sL https://dl.k8s.io/release/stable.txt)"
+          curl -sLo "$RUNNER_TEMP/kubectl" "https://dl.k8s.io/release/${VER}/bin/linux/amd64/kubectl"
+          chmod +x "$RUNNER_TEMP/kubectl"
+          sudo mv "$RUNNER_TEMP/kubectl" /usr/local/bin/kubectl 2>/dev/null || {
+            mkdir -p "$HOME/bin"; mv "$RUNNER_TEMP/kubectl" "$HOME/bin/kubectl"; echo "$HOME/bin" >> "$GITHUB_PATH"; }
+
+      - name: Wait for image pickup and healthy rollout
+        env:
+          DEPLOYMENT: ${{ inputs.deployment }}
+          IMAGE_REF: ${{ inputs.image_ref }}
+          NAMESPACE: ${{ inputs.namespace }}
+          TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -eu
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          kc() {
+            kubectl --server=https://kubernetes.default.svc \
+                    --certificate-authority="$SA/ca.crt" \
+                    --token="$(cat "$SA/token")" \
+                    -n "$NAMESPACE" "$@"
+          }
+
+          deadline=$(( $(date +%s) + TIMEOUT ))
+          echo ">>> Waiting for $NAMESPACE/$DEPLOYMENT to run $IMAGE_REF (timeout ${TIMEOUT}s)"
+
+          # Phase 1: Image Updater must set the new image on the Deployment.
+          while :; do
+            current="$(kc get deploy "$DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '<not-found>')"
+            [ "$current" = "$IMAGE_REF" ] && break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "!!! Timed out: deployment still runs '$current' — Image Updater never picked up $IMAGE_REF"
+              echo "    (check: tag matches allow-tags regexp, ACR push succeeded, image updater logs in argocd ns)"
+              exit 1
+            fi
+            echo "    image not picked up yet (current: $current) — retrying in 10s"
+            sleep 10
+          done
+          echo ">>> Image picked up. Waiting for rollout to complete..."
+
+          # Phase 2: the rollout with that image must finish and be healthy.
+          remaining=$(( deadline - $(date +%s) )); [ "$remaining" -lt 30 ] && remaining=30
+          kc rollout status "deploy/$DEPLOYMENT" --timeout="${remaining}s"
+
+          ready="$(kc get deploy "$DEPLOYMENT" -o jsonpath='{.status.readyReplicas}')"
+          echo ">>> SUCCESS: $DEPLOYMENT is running $IMAGE_REF with ${ready:-0} ready replica(s)"
