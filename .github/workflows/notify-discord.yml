@@ -32,7 +32,7 @@ on:
 jobs:
   notify:
     name: Discord Notification
-    runs-on: ubuntu-latest   # GitHub-hosted — always available even if your VM is down
+    runs-on: ai-garden   # GitHub-hosted — always available even if your VM is down
 
     steps:
       - name: Send Discord notification
