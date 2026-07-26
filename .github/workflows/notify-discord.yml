@@ -11,6 +11,12 @@ name: "Stage: Discord Notification"
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >
+          Runner labels as a JSON array. If the caller sets this, that value is used;
+          if omitted, falls back to the in-cluster momah/ai-garden self-hosted runner below.
+        type: string
+        default: '["self-hosted", "linux", "x64", "momah", "ai-garden"]'
       deploy_result:
         description: "Final deployment result: success | failure | cancelled"
         type: string
@@ -32,7 +38,7 @@ on:
 jobs:
   notify:
     name: Discord Notification
-    runs-on: ubuntu-latest   # GitHub-hosted — always available even if your VM is down
+    runs-on: ${{ fromJSON(inputs.runner) }}   # defaults to self-hosted; override via the `runner` input
 
     steps:
       - name: Send Discord notification
