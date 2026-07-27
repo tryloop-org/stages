@@ -137,7 +137,31 @@ jobs:
             "${CONTEXT}"
 
           echo ">>> Pushing single tag: ${TARGET_IMAGE_TAG}"
-          docker push "${TARGET_IMAGE_TAG}"
+
+          # Pushes to ACR fail intermittently on self-hosted runners with
+          # `connect: connection refused` mid-upload — SNAT port exhaustion
+          # while several layers upload in parallel, or an ACR Traffic Manager
+          # backend rotating out from under a cached IP. Neither is fixable
+          # here and both clear on their own.
+          #
+          # Retrying is cheap and safe: a push is idempotent, so layers that
+          # already landed are skipped and only the missing ones are re-sent.
+          # The registry token is re-issued on each attempt, since a connection
+          # dropped mid-auth can leave it unusable.
+          PUSH_ATTEMPTS=3
+          attempt=1
+          until docker push "${TARGET_IMAGE_TAG}"; do
+            if [ "$attempt" -ge "$PUSH_ATTEMPTS" ]; then
+              echo "!!! push failed after ${PUSH_ATTEMPTS} attempts"
+              exit 1
+            fi
+            backoff=$((attempt * 15))
+            echo ">>> push attempt ${attempt}/${PUSH_ATTEMPTS} failed; retrying in ${backoff}s"
+            sleep "$backoff"
+            echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
+              --username "$ACR_USERNAME" --password-stdin
+            attempt=$((attempt + 1))
+          done
 
           echo "image_ref=${TARGET_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           docker logout "$ACR_LOGIN_SERVER"
