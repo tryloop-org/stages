@@ -7,7 +7,13 @@
 #export DISCORD_WEBHOOK="https://discord.com/api/webhooks/..."
 #export VM_PASSWORD="your-dev-vm-sudo-password"
 #export VM_PROD_PASSWORD="your-prod-vm-sudo-password"
-export SECURITY_TOOLS_PAT="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"
+#export SECURITY_TOOLS_PAT="ghp_..."
+#
+# This line used to hold a literal token, live code among commented examples.
+# The value went stale when the PAT was rotated and nothing flagged it: the
+# file said one thing, GitHub held another, and repos seeded from here kept
+# overriding the good org secret with a dead value. Export it instead.
+# To rotate a secret across the org, prefer rotate_secret_github.sh.
 #bash create_secret_github.sh
 #
 # Requirements: gh CLI installed and authenticated (gh auth login)

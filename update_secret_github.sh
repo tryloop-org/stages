@@ -3,10 +3,14 @@
 # Force-update a single secret across every repo in the org.
 # Overwrites existing values — use this when rotating a secret.
 #
-# Usage:
-export SECRET_NAME="SECURITY_TOOLS_PAT"
-export SECRET_VALUE=""
-#bash update_secret_github.sh
+# Usage — export both in your shell, never hardcode the value here:
+#   export SECRET_NAME="SECURITY_TOOLS_PAT"
+#   export SECRET_VALUE="ghp_..."
+#   bash update_secret_github.sh
+#
+# These two lines used to be live code rather than comments, so line 8 reset
+# SECRET_VALUE to "" on every run and the script always failed its own
+# validation below, whatever you exported.
 #
 # Requirements: gh CLI installed and authenticated (gh auth login)
 # ─────────────────────────────────────────────────────────────────────────────

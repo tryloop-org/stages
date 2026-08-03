@@ -1,0 +1,4 @@
+# Holds a live PAT hardcoded for convenience. Never commit it: GitHub scans
+# pushes for ghp_ tokens and revokes what it finds, which is what took every
+# service's pipeline down when the old token sat in create_secret_github.sh.
+rotate_secret_github.sh
