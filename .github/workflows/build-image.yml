@@ -41,13 +41,21 @@ on:
         default: ""
 
     secrets:
+      # All three are optional now. The runner mounts an ACR push credential at
+      # /etc/acr/config.json (action-runner/runner-minister.yaml) and that is
+      # the preferred source; these remain as a fallback for runners without
+      # the mount. Passing an empty secret used to produce
+      # `docker login --username ""` -> "Must provide --username with
+      # --password-stdin", which is why the build now checks before logging in.
       acr_login_server:
-        description: "e.g. youracr.azurecr.io"
-        required: true
+        description: >
+          e.g. youracr.azurecr.io. Optional — when omitted it is read from the
+          registry host in the mounted credential.
+        required: false
       acr_username:
-        required: true
+        required: false
       acr_password:
-        required: true
+        required: false
       extra_build_arg_secrets:
         description: >
           Extra --build-arg entries sourced from secrets, one per line (KEY=VALUE).
@@ -68,25 +76,16 @@ jobs:
   build:
     name: Build & Push
     runs-on: ${{ fromJSON(inputs.runner) }}
-    # Runs the whole job inside this image instead of directly on the runner —
-    # gives us `docker` even on runners that don't have it installed (e.g. the
-    # in-cluster momah/ai-garden runner pod). Requires the runner to support
-    # job containers (ARC container-mode hooks); on a plain VM runner that
-    # already has Docker this is a no-op either way.
-    container:
-      image: docker:24-dind
+    # No job container. This used to run in docker:24-dind on the assumption
+    # that the in-cluster runner had no docker, but it does — the runner drives
+    # /usr/local/bin/docker against its dind sidecar, which is how it built the
+    # job container in the first place. Running directly on the runner is also
+    # what makes the mounted ACR credential reachable: a secret mounted into the
+    # runner pod is not visible inside a job container.
     outputs:
       image_ref: ${{ steps.build_step.outputs.image_ref }}
 
     steps:
-      # docker:24-dind is Alpine-based — no bash, no git out of the box.
-      # actions/checkout needs git, and our build script below is bash (arrays,
-      # <<<, etc.), so both must be installed before anything else runs. This
-      # one step must use `shell: sh` explicitly since bash doesn't exist yet.
-      - name: Install bash + git (Alpine base image has neither)
-        shell: sh
-        run: apk add --no-cache bash git
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -109,8 +108,51 @@ jobs:
         run: |
           set -eu
 
-          echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
-            --username "$ACR_USERNAME" --password-stdin
+          # Registry auth comes from one of two places, in this order:
+          #
+          #   1. /etc/acr/config.json — a docker config mounted into the runner
+          #      pod from the cluster's `acr-push-config` secret. This is the
+          #      normal path. GitHub organization secrets are a paid feature for
+          #      private repos, so when tryloop-org moved to the Free plan the
+          #      ACR_* secrets silently resolved to "" and every build failed on
+          #      `docker login --username ""`. Reading the credential from the
+          #      cluster removes GitHub from the loop entirely.
+          #   2. The ACR_* secrets, for runners without that mount.
+          #
+          # MOUNTED_CONFIG is copied rather than used in place: the mount is
+          # read-only and the docker CLI writes into its config directory.
+          MOUNTED_CONFIG=/etc/acr/config.json
+          USED_DOCKER_LOGIN=0
+
+          if [ -f "$MOUNTED_CONFIG" ]; then
+            echo ">>> auth: credential mounted from the cluster"
+            export DOCKER_CONFIG="${RUNNER_TEMP}/docker-acr"
+            mkdir -p "$DOCKER_CONFIG"
+            cp "$MOUNTED_CONFIG" "$DOCKER_CONFIG/config.json"
+            chmod 600 "$DOCKER_CONFIG/config.json"
+
+            # The registry host is the key under .auths, so the caller does not
+            # have to supply acr_login_server alongside the mount.
+            if [ -z "$ACR_LOGIN_SERVER" ]; then
+              ACR_LOGIN_SERVER=$(grep -oE '[A-Za-z0-9_-]+\.azurecr\.io' "$MOUNTED_CONFIG" | head -1)
+            fi
+            if [ -z "$ACR_LOGIN_SERVER" ]; then
+              echo "!!! ${MOUNTED_CONFIG} has no *.azurecr.io registry host and acr_login_server was not passed"
+              exit 1
+            fi
+          else
+            echo ">>> auth: ACR_* secrets"
+            if [ -z "$ACR_LOGIN_SERVER" ] || [ -z "$ACR_USERNAME" ] || [ -z "$ACR_PASSWORD" ]; then
+              echo "!!! no registry credential available:"
+              echo "    ${MOUNTED_CONFIG} is not mounted, and the ACR_* secrets are empty."
+              echo "    Empty secrets usually mean org-level secrets are not reaching this"
+              echo "    private repo — check the organization's GitHub plan."
+              exit 1
+            fi
+            echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
+              --username "$ACR_USERNAME" --password-stdin
+            USED_DOCKER_LOGIN=1
+          fi
 
           TARGET_IMAGE_TAG="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${REF_NAME}"
 
@@ -158,10 +200,20 @@ jobs:
             backoff=$((attempt * 15))
             echo ">>> push attempt ${attempt}/${PUSH_ATTEMPTS} failed; retrying in ${backoff}s"
             sleep "$backoff"
-            echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
-              --username "$ACR_USERNAME" --password-stdin
+            # Only re-issue the token on the login path; the mounted credential
+            # is a static config the daemon re-reads on each push.
+            if [ "$USED_DOCKER_LOGIN" = "1" ]; then
+              echo "$ACR_PASSWORD" | docker login "$ACR_LOGIN_SERVER" \
+                --username "$ACR_USERNAME" --password-stdin
+            fi
             attempt=$((attempt + 1))
           done
 
           echo "image_ref=${TARGET_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          docker logout "$ACR_LOGIN_SERVER"
+          if [ "$USED_DOCKER_LOGIN" = "1" ]; then
+            docker logout "$ACR_LOGIN_SERVER"
+          else
+            # The copy under RUNNER_TEMP holds the registry credential; the
+            # runner is long-lived, so don't leave it on disk between jobs.
+            rm -rf "$DOCKER_CONFIG"
+          fi
