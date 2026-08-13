@@ -86,6 +86,23 @@ jobs:
       image_ref: ${{ steps.build_step.outputs.image_ref }}
 
     steps:
+      # The runner's docker CLI has no buildx plugin, so `docker build` quietly
+      # falls back to the legacy builder ("DEPRECATED: The legacy builder is
+      # deprecated"). That builder spawns a container per Dockerfile instruction
+      # — 27 of them for minister-mind-fe — and stretched a 102s build to 555s.
+      # docker:24-dind, which this job used to run inside, bundles buildx; that
+      # is the only reason builds were fast before the job container was dropped.
+      # Nothing about it was ever declared, so restore it explicitly.
+      #
+      # driver: docker keeps BuildKit pointed at the daemon's built-in builder
+      # and its local image store, so `docker build -t` followed by `docker push`
+      # still works. The default docker-container driver builds into a separate
+      # cache and would need --load or --push instead.
+      - name: Enable BuildKit (the runner ships without buildx)
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
