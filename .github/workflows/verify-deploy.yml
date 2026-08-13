@@ -24,6 +24,18 @@ on:
         description: "Exact image the deployment must end up running, incl. tag (e.g. $ACR/momah-service/dev/foo:v1.2.3.dev)"
         required: true
         type: string
+      image_digest:
+        description: >
+          Optional `sha256:…` from build-image.yml's image_digest output. Set it
+          when the app's ArgoCD Image Updater uses the `digest` strategy — that
+          strategy pins the workload to `repo:tag@sha256:…`, which never equals
+          image_ref, so the default exact match would spin until it timed out on
+          a perfectly healthy deploy. With this set, the wait keys off the digest
+          being present in the running image instead, which is the only thing
+          that actually distinguishes one push from the next on a mutable tag.
+        required: false
+        type: string
+        default: ""
       namespace:
         description: "Kubernetes namespace of the deployment"
         required: false
@@ -54,6 +66,7 @@ jobs:
         env:
           DEPLOYMENT: ${{ inputs.deployment }}
           IMAGE_REF: ${{ inputs.image_ref }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
           NAMESPACE: ${{ inputs.namespace }}
           TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
@@ -66,15 +79,41 @@ jobs:
                     -n "$NAMESPACE" "$@"
           }
 
+          # Two ways to recognise "the cluster is running THIS build":
+          #
+          #   tag strategies    the Deployment image equals image_ref exactly
+          #                     ($ACR/repo:v1.2.3.dev). The tag is immutable, so
+          #                     the string alone identifies the build.
+          #
+          #   digest strategy   the tag is a branch name and never changes, so
+          #                     the string proves nothing — the previous push
+          #                     wore the same one. Image Updater pins the
+          #                     workload to repo:tag@sha256:… instead, so match
+          #                     on the digest being present. Substring rather
+          #                     than equality because the exact shape of what
+          #                     Image Updater writes (repo@sha256:… vs
+          #                     repo:tag@sha256:…) is its business, not ours.
+          if [ -n "$IMAGE_DIGEST" ]; then
+            WANTED="$IMAGE_DIGEST"
+            echo ">>> Waiting for $NAMESPACE/$DEPLOYMENT to run digest $IMAGE_DIGEST"
+            echo "    (image: $IMAGE_REF, matched by digest — mutable tag)"
+          else
+            WANTED="$IMAGE_REF"
+            echo ">>> Waiting for $NAMESPACE/$DEPLOYMENT to run $IMAGE_REF (timeout ${TIMEOUT}s)"
+          fi
+
           deadline=$(( $(date +%s) + TIMEOUT ))
-          echo ">>> Waiting for $NAMESPACE/$DEPLOYMENT to run $IMAGE_REF (timeout ${TIMEOUT}s)"
 
           # Phase 1: Image Updater must set the new image on the Deployment.
           while :; do
             current="$(kc get deploy "$DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '<not-found>')"
-            [ "$current" = "$IMAGE_REF" ] && break
+            if [ -n "$IMAGE_DIGEST" ]; then
+              case "$current" in *"$WANTED"*) break ;; esac
+            else
+              [ "$current" = "$WANTED" ] && break
+            fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "!!! Timed out: deployment still runs '$current' — Image Updater never picked up $IMAGE_REF"
+              echo "!!! Timed out: deployment still runs '$current' — Image Updater never picked up $WANTED"
               echo "    (check: tag matches allow-tags regexp, ACR push succeeded, image updater logs in argocd ns)"
               exit 1
             fi
@@ -88,4 +127,4 @@ jobs:
           kc rollout status "deploy/$DEPLOYMENT" --timeout="${remaining}s"
 
           ready="$(kc get deploy "$DEPLOYMENT" -o jsonpath='{.status.readyReplicas}')"
-          echo ">>> SUCCESS: $DEPLOYMENT is running $IMAGE_REF with ${ready:-0} ready replica(s)"
+          echo ">>> SUCCESS: $DEPLOYMENT is running ${current} with ${ready:-0} ready replica(s)"

@@ -71,6 +71,14 @@ on:
       image_ref:
         description: "Full image ref pushed for this build (registry/name:sha)"
         value: ${{ jobs.build.outputs.image_ref }}
+      image_digest:
+        description: >
+          Manifest digest of the image just pushed, as `sha256:…`. Needed by
+          callers whose ArgoCD app uses Image Updater's `digest` strategy: the
+          tag they push is mutable (a branch name), so the only way to tell the
+          new deploy from the old one is the digest. Pass it to
+          verify-deploy.yml's `image_digest` input.
+        value: ${{ jobs.build.outputs.image_digest }}
 
 jobs:
   build:
@@ -84,6 +92,7 @@ jobs:
     # runner pod is not visible inside a job container.
     outputs:
       image_ref: ${{ steps.build_step.outputs.image_ref }}
+      image_digest: ${{ steps.build_step.outputs.image_digest }}
 
     steps:
       # The runner's docker CLI has no buildx plugin, so `docker build` quietly
@@ -227,6 +236,27 @@ jobs:
           done
 
           echo "image_ref=${TARGET_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Manifest digest of what we just pushed. RepoDigests is only
+          # populated once the image has been pushed, which is why this runs
+          # after the push loop and not next to the build.
+          #
+          # Callers on a MUTABLE tag (a branch name rather than v*.dev) have no
+          # other way to identify this specific build: the tag string is the
+          # same on every push, so verify-deploy.yml cannot tell the new
+          # rollout from the previous one without this. Tag-driven callers can
+          # ignore it.
+          IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "${TARGET_IMAGE_TAG}" 2>/dev/null | cut -s -d'@' -f2 || true)"
+          if [ -n "$IMAGE_DIGEST" ]; then
+            echo ">>> Pushed digest: ${IMAGE_DIGEST}"
+          else
+            # Not fatal — the push already succeeded and tag-driven callers
+            # never read this. Only a caller that asked to verify by digest
+            # is affected, and verify-deploy.yml fails loudly on an empty one.
+            echo ">>> WARNING: could not read a RepoDigest for ${TARGET_IMAGE_TAG}"
+          fi
+          echo "image_digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
           if [ "$USED_DOCKER_LOGIN" = "1" ]; then
             docker logout "$ACR_LOGIN_SERVER"
           else
