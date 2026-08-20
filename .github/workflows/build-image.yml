@@ -104,9 +104,13 @@ jobs:
       # Nothing about it was ever declared, so restore it explicitly.
       #
       # driver: docker keeps BuildKit pointed at the daemon's built-in builder
-      # and its local image store, so `docker build -t` followed by `docker push`
-      # still works. The default docker-container driver builds into a separate
-      # cache and would need --load or --push instead.
+      # and its local image store, so `docker buildx build -t` followed by
+      # `docker push` still works. The default docker-container driver builds
+      # into a separate cache and would need --load or --push instead.
+      #
+      # This installs the plugin under ~/.docker/cli-plugins, which the build
+      # step below has to preserve when it repoints DOCKER_CONFIG for the
+      # mounted ACR credential — see the comment there.
       - name: Enable BuildKit (the runner ships without buildx)
         uses: docker/setup-buildx-action@v3
         with:
@@ -154,6 +158,17 @@ jobs:
             echo ">>> auth: credential mounted from the cluster"
             export DOCKER_CONFIG="${RUNNER_TEMP}/docker-acr"
             mkdir -p "$DOCKER_CONFIG"
+
+            # Seed from the runner's own ~/.docker before writing the
+            # credential. The CLI resolves plugins from $DOCKER_CONFIG/cli-plugins,
+            # so pointing DOCKER_CONFIG at a bare temp dir hides the buildx that
+            # setup-buildx-action just installed under ~/.docker/cli-plugins —
+            # `docker build` then silently falls back to the legacy builder and
+            # the 5x slowdown that step exists to prevent comes straight back.
+            if [ -d "${HOME}/.docker" ]; then
+              cp -a "${HOME}/.docker/." "$DOCKER_CONFIG/"
+            fi
+
             cp "$MOUNTED_CONFIG" "$DOCKER_CONFIG/config.json"
             chmod 600 "$DOCKER_CONFIG/config.json"
 
@@ -195,10 +210,17 @@ jobs:
           $EXTRA_BUILD_ARG_SECRETS
           EOF
 
+          # `docker buildx build`, not `docker build`: the latter degrades to the
+          # legacy builder without failing when the plugin is not visible, which
+          # is how a 102s build silently became 555s for weeks. Spelling out
+          # buildx turns that into a hard error instead. Printing the version
+          # first leaves the proof in the log.
+          docker buildx version
+
           echo ">>> Building ${TARGET_IMAGE_TAG}"
-          
+
           # On passe la chaîne de caractères directement (sans guillemets autour de la variable pour que le shell sépare les arguments)
-          docker build \
+          docker buildx build \
             $BUILD_ARG_FLAGS \
             -f "${DOCKERFILE}" \
             -t "${TARGET_IMAGE_TAG}" \
