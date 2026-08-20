@@ -84,6 +84,7 @@ jobs:
           DEPLOY_SCRIPT: ${{ inputs.deploy_script }}
           VERIFY_SCRIPT: ${{ inputs.verify_script }}
           DEPLOY_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ github.ref_type == 'tag' }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPO: ${{ github.repository }}
         run: |
@@ -113,9 +114,23 @@ jobs:
             echo "$VM_PASSWORD" | sudo -S cp "$DEST_DIR/.env" "$ENV_BACKUP"
           fi
 
-          echo ">>> Fetching tags and checking out $DEPLOY_TAG..." | tee -a "$LOG_FILE"
-          echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags 2>&1 | tee -a "$LOG_FILE"
+          echo ">>> Fetching and checking out $DEPLOY_TAG (tag=$IS_TAG)..." | tee -a "$LOG_FILE"
+          echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags origin 2>&1 | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout "$DEPLOY_TAG" 2>&1 | tee -a "$LOG_FILE"
+
+          # A BRANCH ref needs one more step. `git checkout <branch>` when the VM
+          # is already on that branch prints "Already on 'prod'" and moves
+          # nothing: the fetch advanced origin/prod, but the working tree still
+          # holds the PREVIOUS deploy's commit. `docker compose build` would then
+          # rebuild the old code and the pipeline would go green having shipped
+          # nothing. Only the very first deploy — a fresh clone — looks correct.
+          #
+          # Tags resolve to one commit forever, so the tag-driven callers cannot
+          # hit this; hence the guard rather than an unconditional reset.
+          if [ "$IS_TAG" != "true" ]; then
+            echo ">>> Branch ref — hard-resetting to origin/$DEPLOY_TAG" | tee -a "$LOG_FILE"
+            echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" reset --hard "origin/$DEPLOY_TAG" 2>&1 | tee -a "$LOG_FILE"
+          fi
 
           # ── Restore .env after checkout ───────────────────────────────────
           if [ -f "$ENV_BACKUP" ]; then
