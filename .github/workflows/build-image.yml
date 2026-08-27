@@ -35,6 +35,26 @@ on:
         description: "Path to the Dockerfile, relative to repo root"
         type: string
         default: "Dockerfile"
+      push_latest:
+        description: >
+          Also push `<image>:latest` alongside the version tag.
+
+          Keel resolves the digest of the tag a Deployment is *currently*
+          running before it can register a watch on that repository. On a first
+          deploy that tag is `latest`; if `latest` does not exist the HEAD 404s
+          ("failed to get image digest") and Keel never registers the watch at
+          all — so it never evaluates its policy, and the service is stranded on
+          a tag that cannot be pulled. Pushing `latest` makes the bootstrap
+          work: Keel then immediately rolls the Deployment on to the newest tag
+          matching its policy (measured at ~5s).
+
+          Off by default because the dev/ACR pipeline feeds ArgoCD Image
+          Updater, whose own tag matching should not be handed a new `latest`
+          without checking it first. Stage and preprod, which are Keel-driven,
+          pass true.
+        type: boolean
+        default: false
+
       build_args:
         description: "Extra --build-arg entries, one per line (KEY=VALUE)"
         type: string
@@ -135,6 +155,7 @@ jobs:
           EXTRA_BUILD_ARG_SECRETS: ${{ secrets.extra_build_arg_secrets }}
           REF_NAME: ${{ github.ref_name }} #extract the tag 
           IS_TAG: ${{ github.ref_type == 'tag' }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
         run: |
           set -eu
 
@@ -279,6 +300,29 @@ jobs:
             echo ">>> WARNING: could not read a RepoDigest for ${TARGET_IMAGE_TAG}"
           fi
           echo "image_digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+          # A moving `latest` alongside the immutable version tag. Tag builds
+          # only — a branch build has no business claiming `latest`.
+          #
+          # The Deployment does not stay on this tag: it is the bootstrap that
+          # lets Keel resolve a digest at all, after which Keel rewrites the
+          # image to the versioned tag its policy selected.
+          if [ "$PUSH_LATEST" = "true" ] && [ "$IS_TAG" = "true" ]; then
+            LATEST_IMAGE_TAG="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
+            echo ">>> Also pushing ${LATEST_IMAGE_TAG}"
+            docker tag "${TARGET_IMAGE_TAG}" "${LATEST_IMAGE_TAG}"
+            attempt=1
+            until docker push "${LATEST_IMAGE_TAG}"; do
+              if [ "$attempt" -ge "$PUSH_ATTEMPTS" ]; then
+                echo "!!! pushing latest failed after ${PUSH_ATTEMPTS} attempts"
+                exit 1
+              fi
+              backoff=$((attempt * 15))
+              echo ">>> latest push attempt ${attempt}/${PUSH_ATTEMPTS} failed; retrying in ${backoff}s"
+              sleep "$backoff"
+              attempt=$((attempt + 1))
+            done
+          fi
+
           if [ "$USED_DOCKER_LOGIN" = "1" ]; then
             docker logout "$ACR_LOGIN_SERVER"
           else
