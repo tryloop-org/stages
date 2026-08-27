@@ -222,10 +222,23 @@ jobs:
           # every flag appended there is lost before docker build reads them.
           # EXTRA_BUILD_ARG_SECRETS rides along here — same KEY=VALUE lines,
           # just sourced from the caller's `secrets:` block.
-          BUILD_ARG_FLAGS=""
+          # An array, not a string: a value containing spaces survives, and
+          # nothing depends on word splitting to separate the flags.
+          BUILD_ARG_FLAGS=()
           while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            BUILD_ARG_FLAGS="$BUILD_ARG_FLAGS --build-arg $line"
+            # The heredoc below is indented, so every line arrives with leading
+            # whitespace. Trim both ends before inspecting it.
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            # Skip blanks and comments. `build_args: |` is a LITERAL block
+            # scalar, so a `#` line written by a caller is not a YAML comment —
+            # it arrives here as ordinary text. Passing it through produced
+            # `--build-arg # Anon key for THIS environment...`, whose remaining
+            # words became stray positional arguments, and docker rejected the
+            # whole command with:
+            #   ERROR: docker: 'docker buildx build' requires 1 argument
+            case "$line" in ''|'#'*) continue ;; esac
+            BUILD_ARG_FLAGS+=(--build-arg "$line")
           done <<EOF
           $BUILD_ARGS
           $EXTRA_BUILD_ARG_SECRETS
@@ -240,9 +253,11 @@ jobs:
 
           echo ">>> Building ${TARGET_IMAGE_TAG}"
 
-          # On passe la chaîne de caractères directement (sans guillemets autour de la variable pour que le shell sépare les arguments)
+          # ${arr[@]+"${arr[@]}"} expands to nothing when the array is empty
+          # and to properly quoted elements otherwise — plain "${arr[@]}" would
+          # trip `set -u` on an empty array in older bash.
           docker buildx build \
-            $BUILD_ARG_FLAGS \
+            ${BUILD_ARG_FLAGS[@]+"${BUILD_ARG_FLAGS[@]}"} \
             -f "${DOCKERFILE}" \
             -t "${TARGET_IMAGE_TAG}" \
             "${CONTEXT}"
