@@ -35,6 +35,15 @@ on:
         description: "Path to the Dockerfile, relative to repo root"
         type: string
         default: "Dockerfile"
+      target:
+        description: >
+          Multi-stage build target to stop at (docker buildx build --target).
+          Empty (default) builds the last stage, same as plain `docker build`
+          — set this when a Dockerfile defines more than one final stage (e.g.
+          separate `api` and `auditshipper` images from one file) and the last
+          stage isn't the one this caller wants.
+        type: string
+        default: ""
       push_latest:
         description: >
           Also push `<image>:latest` alongside the version tag.
@@ -151,6 +160,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image_name }}
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_TARGET: ${{ inputs.target }}
           BUILD_ARGS: ${{ inputs.build_args }}
           EXTRA_BUILD_ARG_SECRETS: ${{ secrets.extra_build_arg_secrets }}
           REF_NAME: ${{ github.ref_name }} #extract the tag 
@@ -256,7 +266,11 @@ jobs:
           # ${arr[@]+"${arr[@]}"} expands to nothing when the array is empty
           # and to properly quoted elements otherwise — plain "${arr[@]}" would
           # trip `set -u` on an empty array in older bash.
+          TARGET_FLAGS=()
+          [ -n "$BUILD_TARGET" ] && TARGET_FLAGS=(--target "$BUILD_TARGET")
+
           docker buildx build \
+            ${TARGET_FLAGS[@]+"${TARGET_FLAGS[@]}"} \
             ${BUILD_ARG_FLAGS[@]+"${BUILD_ARG_FLAGS[@]}"} \
             -f "${DOCKERFILE}" \
             -t "${TARGET_IMAGE_TAG}" \
