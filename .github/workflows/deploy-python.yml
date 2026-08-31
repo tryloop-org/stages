@@ -106,6 +106,13 @@ jobs:
             echo "$VM_PASSWORD" | sudo -S git clone \
               "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPO}.git" \
               "$DEST_DIR" 2>&1 | tee -a "$LOG_FILE"
+          else
+            # The clone above bakes that run's GH_TOKEN into the saved origin
+            # URL. GH_TOKEN expires with the job, so a later deploy reusing
+            # this checkout would fetch with a dead token and fail auth —
+            # refresh it with the current run's token every time.
+            echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" remote set-url origin \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPO}.git" 2>&1 | tee -a "$LOG_FILE"
           fi
 
           # ── Backup .env before checkout to prevent overwrite ──────────────
