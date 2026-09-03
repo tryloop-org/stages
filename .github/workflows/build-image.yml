@@ -69,6 +69,39 @@ on:
         type: string
         default: ""
 
+      openbao_service:
+        description: >
+          If set, fetch additional --build-arg entries from OpenBao
+          (kv/<openbao_service>/<bucket> for each bucket in openbao_buckets,
+          namespace openbao_env) and merge them in alongside build_args /
+          extra_build_arg_secrets. For a frontend whose VITE_* values are
+          baked into the bundle at build time, not read at runtime — the
+          same OpenBao paths a service's ExternalSecret already reads from
+          can be reused here directly, no separate copy of the values.
+          Auth is the runner's own in-cluster ServiceAccount token via
+          OpenBao's Kubernetes auth (same mechanism verify-deploy.yml uses
+          against this cluster's API server) — no GitHub secret involved.
+          Empty (default) skips this step entirely; every existing caller
+          is unaffected.
+        type: string
+        default: ""
+      openbao_buckets:
+        description: "Comma-separated OpenBao KV buckets to pull as build args (only used when openbao_service is set)"
+        type: string
+        default: "config"
+      openbao_env:
+        description: "OpenBao namespace tier (dev/stage/uat)"
+        type: string
+        default: "dev"
+      openbao_role:
+        description: "OpenBao Kubernetes-auth role name. Defaults to <openbao_service>-ci"
+        type: string
+        default: ""
+      openbao_addr:
+        description: "OpenBao server URL"
+        type: string
+        default: "https://openbao.momrahai.com"
+
     secrets:
       # All three are optional now. The runner mounts an ACR push credential at
       # /etc/acr/config.json (action-runner/runner-minister.yaml) and that is
@@ -150,6 +183,62 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Only runs when a caller opts in via openbao_service. The runner lives
+      # INSIDE this cluster (github-runners namespace), so it authenticates
+      # with its own ServiceAccount token -- same approach as
+      # stages/verify-deploy.yml, just against OpenBao's Kubernetes auth
+      # endpoint instead of the K8s API server directly. The OpenBao role
+      # (see k8s/shared/openbao/README.md's "Add a new service" pattern) must
+      # bind github-runners/runner and grant read-only on kv/data/<service>/*
+      # -- least privilege, scoped to exactly the one service being built.
+      - name: Fetch build args from OpenBao
+        id: openbao
+        if: inputs.openbao_service != ''
+        shell: bash
+        env:
+          OPENBAO_ADDR: ${{ inputs.openbao_addr }}
+          OPENBAO_NAMESPACE: ${{ inputs.openbao_env }}
+          OPENBAO_SERVICE: ${{ inputs.openbao_service }}
+          OPENBAO_BUCKETS: ${{ inputs.openbao_buckets }}
+          OPENBAO_ROLE: ${{ inputs.openbao_role != '' && inputs.openbao_role || format('{0}-ci', inputs.openbao_service) }}
+        run: |
+          set -eu
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          JWT="$(cat "$SA/token")"
+
+          LOGIN_HTTP=$(curl -sS -o "$RUNNER_TEMP/openbao-login.json" -w "%{http_code}" \
+            -X POST "${OPENBAO_ADDR}/v1/auth/kubernetes/login" \
+            -H "X-Vault-Namespace: ${OPENBAO_NAMESPACE}" \
+            -d "{\"role\":\"${OPENBAO_ROLE}\",\"jwt\":\"${JWT}\"}")
+          if [ "$LOGIN_HTTP" != "200" ]; then
+            echo "!!! OpenBao login failed (HTTP ${LOGIN_HTTP}) for role ${OPENBAO_ROLE} in namespace ${OPENBAO_NAMESPACE}"
+            cat "$RUNNER_TEMP/openbao-login.json"
+            exit 1
+          fi
+          BAO_TOKEN=$(python3 -c 'import json;print(json.load(open("'"$RUNNER_TEMP"'/openbao-login.json"))["auth"]["client_token"])')
+
+          {
+            echo "build_args<<OPENBAO_EOF"
+            IFS=',' read -ra BUCKETS <<< "$OPENBAO_BUCKETS"
+            for bucket in "${BUCKETS[@]}"; do
+              bucket="$(echo "$bucket" | xargs)"
+              [ -z "$bucket" ] && continue
+              HTTP=$(curl -sS -o "$RUNNER_TEMP/openbao-kv.json" -w "%{http_code}" \
+                "${OPENBAO_ADDR}/v1/kv/data/${OPENBAO_SERVICE}/${bucket}" \
+                -H "X-Vault-Namespace: ${OPENBAO_NAMESPACE}" \
+                -H "X-Vault-Token: ${BAO_TOKEN}")
+              if [ "$HTTP" != "200" ]; then
+                echo "!!! reading kv/${OPENBAO_SERVICE}/${bucket} failed (HTTP ${HTTP})" >&2
+                cat "$RUNNER_TEMP/openbao-kv.json" >&2
+                exit 1
+              fi
+              python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]["data"]; [print(f"{k}={v}") for k,v in d.items()]' "$RUNNER_TEMP/openbao-kv.json"
+            done
+            echo "OPENBAO_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          rm -f "$RUNNER_TEMP/openbao-login.json" "$RUNNER_TEMP/openbao-kv.json"
+
       - name: Build and push
         id: build_step
         shell: bash
@@ -161,7 +250,9 @@ jobs:
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           BUILD_TARGET: ${{ inputs.target }}
-          BUILD_ARGS: ${{ inputs.build_args }}
+          BUILD_ARGS: |
+            ${{ inputs.build_args }}
+            ${{ steps.openbao.outputs.build_args }}
           EXTRA_BUILD_ARG_SECRETS: ${{ secrets.extra_build_arg_secrets }}
           REF_NAME: ${{ github.ref_name }} #extract the tag 
           IS_TAG: ${{ github.ref_type == 'tag' }}
