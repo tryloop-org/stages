@@ -239,14 +239,42 @@ jobs:
 
           rm -f "$RUNNER_TEMP/openbao-login.json" "$RUNNER_TEMP/openbao-kv.json"
 
+      # Stage moved off the on-prem Harbor path (ai-garden/momahservice/stage/*
+      # on registry.momrah.gov.sa) onto a k3s VM pulling from ACR instead. Every
+      # existing caller still passes the old Harbor image_name/acr_login_server
+      # literally -- rewriting them here means zero changes to any of the ~30
+      # service repos. The runner's mounted /etc/acr/config.json already has a
+      # valid auth entry for ministermindacr.azurecr.io (that is how dev builds
+      # already authenticate), so no new credential is needed for this either.
+      # Matches only the literal legacy stage pattern -- dev, preprod, and any
+      # caller already on ACR pass straight through unchanged.
+      - name: Redirect stage pushes to ACR (k3s migration)
+        id: acr_redirect
+        shell: bash
+        env:
+          IN_IMAGE_NAME: ${{ inputs.image_name }}
+          IN_ACR_LOGIN_SERVER: ${{ secrets.acr_login_server }}
+        run: |
+          set -eu
+          PREFIX="ai-garden/momahservice/stage/"
+          if [ "$IN_ACR_LOGIN_SERVER" = "registry.momrah.gov.sa" ] && [[ "$IN_IMAGE_NAME" == "$PREFIX"* ]]; then
+            SERVICE="${IN_IMAGE_NAME#"$PREFIX"}"
+            echo "acr_login_server=ministermindacr.azurecr.io" >> "$GITHUB_OUTPUT"
+            echo "image_name=momah-service/stage/${SERVICE}" >> "$GITHUB_OUTPUT"
+            echo ">>> redirected stage push: ${IN_ACR_LOGIN_SERVER}/${IN_IMAGE_NAME} -> ministermindacr.azurecr.io/momah-service/stage/${SERVICE}"
+          else
+            echo "acr_login_server=${IN_ACR_LOGIN_SERVER}" >> "$GITHUB_OUTPUT"
+            echo "image_name=${IN_IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         id: build_step
         shell: bash
         env:
-          ACR_LOGIN_SERVER: ${{ secrets.acr_login_server }}
+          ACR_LOGIN_SERVER: ${{ steps.acr_redirect.outputs.acr_login_server }}
           ACR_USERNAME: ${{ secrets.acr_username }}
           ACR_PASSWORD: ${{ secrets.acr_password }}
-          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_NAME: ${{ steps.acr_redirect.outputs.image_name }}
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           BUILD_TARGET: ${{ inputs.target }}
