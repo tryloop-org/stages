@@ -1,0 +1,28 @@
+name: "Stage: Verify Tag Branch"
+
+on:
+  workflow_call:
+    inputs:
+      required_branch:
+        description: "Branch the pushed tag must be reachable from"
+        type: string
+        default: "production-v2"
+
+jobs:
+  verify:
+    name: Verify tag descends from ${{ inputs.required_branch }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — need branch ancestry)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Confirm ${{ github.ref_name }} is reachable from ${{ inputs.required_branch }}
+        run: |
+          git fetch origin "${{ inputs.required_branch }}"
+          if ! git merge-base --is-ancestor "${{ github.sha }}" "origin/${{ inputs.required_branch }}"; then
+            echo "::error::${{ github.ref_name }} (${{ github.sha }}) is not on branch ${{ inputs.required_branch }} -- refusing to deploy to prod. Cut prod tags from ${{ inputs.required_branch }} only."
+            exit 1
+          fi
+          echo "OK: ${{ github.ref_name }} is reachable from ${{ inputs.required_branch }}"
