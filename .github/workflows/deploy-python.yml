@@ -121,6 +121,17 @@ jobs:
             echo "$VM_PASSWORD" | sudo -S cp "$DEST_DIR/.env" "$ENV_BACKUP"
           fi
 
+          # Some repos have .env tracked in git history despite it being
+          # gitignored today (added before the ignore rule, never untracked
+          # with `git rm --cached`). When that committed blob differs from
+          # the real .env sitting on the VM, `git checkout` refuses with
+          # "local changes ... would be overwritten" and the whole deploy
+          # aborts before the restore step below ever runs. We already have
+          # the real content safe in $ENV_BACKUP, so it's always safe to
+          # discard .env's tracked-file diff right here — whatever checkout
+          # puts in its place gets overwritten by the restore anyway.
+          echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout -- .env 2>/dev/null || true
+
           echo ">>> Fetching and checking out $DEPLOY_TAG (tag=$IS_TAG)..." | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags origin 2>&1 | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout "$DEPLOY_TAG" 2>&1 | tee -a "$LOG_FILE"
