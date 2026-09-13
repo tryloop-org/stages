@@ -133,7 +133,14 @@ jobs:
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout -- .env 2>/dev/null || true
 
           echo ">>> Fetching and checking out $DEPLOY_TAG (tag=$IS_TAG)..." | tee -a "$LOG_FILE"
-          echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags origin 2>&1 | tee -a "$LOG_FILE"
+          # --force: an unrelated tag (usually an old *.dev one, nothing to do
+          # with this deploy) can get deleted and recreated pointing at a new
+          # commit on GitHub. A plain fetch refuses to move that local tag
+          # ("would clobber existing tag") and aborts THIS ENTIRE DEPLOY before
+          # the checkout below ever runs, even though it has nothing to do with
+          # $DEPLOY_TAG. Force it so a stray moved tag can never block a real
+          # deploy again -- observed live on minister-mind-fe's v1.0.104.prod.
+          echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" fetch --tags --force origin 2>&1 | tee -a "$LOG_FILE"
           echo "$VM_PASSWORD" | sudo -S git -C "$DEST_DIR" checkout "$DEPLOY_TAG" 2>&1 | tee -a "$LOG_FILE"
 
           # A BRANCH ref needs one more step. `git checkout <branch>` when the VM
