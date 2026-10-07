@@ -3,6 +3,12 @@ name: "Stage: Verify Tag Branch"
 on:
   workflow_call:
     inputs:
+      runner:
+        description: >
+          Runner labels as a JSON array. If the caller sets this, that value is used;
+          if omitted, falls back to the in-cluster momah/ai-garden self-hosted runner below.
+        type: string
+        default: '["self-hosted", "linux", "x64", "momah", "ai-garden"]'
       required_branch:
         description: "Branch the pushed tag must be reachable from"
         type: string
@@ -11,7 +17,7 @@ on:
 jobs:
   verify:
     name: Verify tag descends from ${{ inputs.required_branch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     steps:
       - name: Checkout (full history — need branch ancestry)
         uses: actions/checkout@v4
